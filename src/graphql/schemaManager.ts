@@ -11,11 +11,74 @@ import type { GraphQLSchema } from "graphql";
 import { builder } from "~/src/graphql/builder";
 import { getPluginManagerInstance } from "~/src/plugin/registry";
 import type { IExtensionRegistry } from "~/src/plugin/types";
+import { ErrorCode } from "~/src/utilities/errors/errorCodes";
+import { TalawaGraphQLError } from "~/src/utilities/TalawaGraphQLError";
 
 class GraphQLSchemaManager {
 	private currentSchema: GraphQLSchema | null = null;
 	private isRebuilding = false;
 	private schemaUpdateCallbacks: Array<(schema: GraphQLSchema) => void> = [];
+
+	/**
+	 * Helper function to safely serialize error objects
+	 */
+	private serializeError(error: unknown): Record<string, unknown> {
+		if (error instanceof Error) {
+			const serialized: Record<string, unknown> = {
+				name: error.name,
+				message: error.message,
+				stack: error.stack,
+			};
+
+			// Include enumerable properties
+			for (const key in error) {
+				if (Object.hasOwn(error, key)) {
+					serialized[key] = (error as unknown as Record<string, unknown>)[key];
+				}
+			}
+
+			return serialized;
+		}
+
+		return { message: String(error) };
+	}
+
+	private logger: {
+		info: (msg: string) => void;
+		error: (msg: string, error?: unknown) => void;
+	} = {
+		info: (msg: string) => {
+			const logEntry = {
+				timestamp: new Date().toISOString(),
+				level: "info",
+				msg,
+			};
+			process.stdout.write(`${JSON.stringify(logEntry)}\n`);
+		},
+		error: (msg: string, error?: unknown) => {
+			const logEntry: Record<string, unknown> = {
+				timestamp: new Date().toISOString(),
+				level: "error",
+				msg,
+			};
+
+			if (error) {
+				logEntry.error = this.serializeError(error);
+			}
+
+			process.stderr.write(`${JSON.stringify(logEntry)}\n`);
+		},
+	};
+
+	/**
+	 * Set a custom logger for the schema manager
+	 */
+	setLogger(logger: {
+		info: (msg: string) => void;
+		error: (msg: string, error?: unknown) => void;
+	}): void {
+		this.logger = logger;
+	}
 
 	/**
 	 * Setup listeners for plugin events that require schema rebuilds
@@ -61,7 +124,12 @@ class GraphQLSchemaManager {
 	async rebuildSchema(): Promise<GraphQLSchema> {
 		if (this.isRebuilding) {
 			if (!this.currentSchema) {
-				throw new Error("No current schema available during rebuild");
+				throw new TalawaGraphQLError({
+					extensions: {
+						code: ErrorCode.INTERNAL_SERVER_ERROR,
+					},
+					message: "No current schema available during rebuild",
+				});
 			}
 			return this.currentSchema;
 		}
@@ -84,7 +152,7 @@ class GraphQLSchemaManager {
 
 			return newSchema;
 		} catch (error) {
-			console.error("Schema rebuild failed:", error);
+			this.logger.error("Schema rebuild failed:", error);
 			throw error;
 		} finally {
 			this.isRebuilding = false;
@@ -106,7 +174,7 @@ class GraphQLSchemaManager {
 			await import("./types/index");
 			// Note: interfaces and unions directories have empty index files, so skipping them
 		} catch (error) {
-			console.error("Core schema import failed:", error);
+			this.logger.error("Core schema import failed:", error);
 			throw error;
 		}
 	}
@@ -117,7 +185,7 @@ class GraphQLSchemaManager {
 	private async registerActivePluginExtensions(): Promise<void> {
 		const pluginManager = getPluginManagerInstance();
 		if (!pluginManager || !pluginManager.isSystemInitialized()) {
-			console.log("Plugin Manager Not Available or Not Initialized");
+			this.logger.info("Plugin Manager Not Available or Not Initialized");
 			return;
 		}
 
@@ -126,7 +194,9 @@ class GraphQLSchemaManager {
 		// Check if there are any plugins loaded
 		const loadedPlugins = pluginManager.getLoadedPlugins();
 		if (loadedPlugins.length === 0) {
-			console.log("No plugins loaded, skipping plugin extension registration");
+			this.logger.info(
+				"No plugins loaded, skipping plugin extension registration",
+			);
 			return;
 		}
 
@@ -157,7 +227,9 @@ class GraphQLSchemaManager {
 						await import(`${pluginPath}/graphql/types`);
 					} catch (_error) {
 						// Plugin types file doesn't exist, continue without it
-						console.log(`No types file found for plugin ${extension.pluginId}`);
+						this.logger.info(
+							`No types file found for plugin ${extension.pluginId}`,
+						);
 					}
 
 					// Create a namespaced builder wrapper that automatically prefixes field names
@@ -168,11 +240,11 @@ class GraphQLSchemaManager {
 
 					// Execute the builder function with the namespaced builder
 					extension.builderFunction(namespacedBuilder);
-					console.log(
+					this.logger.info(
 						`Registered builder extension: ${extension.pluginId}.${extension.fieldName}`,
 					);
 				} catch (error) {
-					console.error(
+					this.logger.error(
 						`Failed to register builder extension ${extension.pluginId}.${extension.fieldName}:`,
 						error,
 					);
@@ -244,7 +316,7 @@ class GraphQLSchemaManager {
 			try {
 				callback(schema);
 			} catch (error) {
-				console.error("Schema update callback failed:", error);
+				this.logger.error("Schema update callback failed:", error);
 			}
 		}
 	}

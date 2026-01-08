@@ -102,6 +102,9 @@ describe("GraphQL Correlation ID Integration", () => {
 		expect(body.errors[0].extensions.correlationId).toBe(
 			response.headers["x-correlation-id"],
 		);
+		expect(body.errors[0].extensions).toMatchObject({
+			code: expect.any(String),
+		});
 	});
 
 	it("should use client-provided x-correlation-id when present", async () => {
@@ -156,6 +159,9 @@ describe("GraphQL Correlation ID Integration", () => {
 		expect(body.errors).toBeDefined();
 		expect(body.errors.length).toBeGreaterThan(0);
 		expect(body.errors[0].extensions.correlationId).toBe(clientCorrelationId);
+		expect(body.errors[0].extensions).toMatchObject({
+			code: expect.any(String),
+		});
 	});
 
 	it("should include correlation ID for syntax errors in GraphQL query", async () => {
@@ -216,6 +222,9 @@ describe("GraphQL Correlation ID Integration", () => {
 
 		body.errors.forEach((error: { extensions: { correlationId: string } }) => {
 			expect(error.extensions.correlationId).toBe(correlationId);
+			expect(error.extensions).toMatchObject({
+				code: expect.any(String),
+			});
 		});
 	});
 
@@ -272,6 +281,9 @@ describe("GraphQL Correlation ID Integration", () => {
 		expect(body.errors[0].extensions.correlationId).toBe(
 			response.headers["x-correlation-id"],
 		);
+		expect(body.errors[0].extensions).toMatchObject({
+			code: expect.any(String),
+		});
 	});
 
 	it("should handle malformed GraphQL requests with correlation ID", async () => {

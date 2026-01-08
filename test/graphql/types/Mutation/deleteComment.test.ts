@@ -1,5 +1,6 @@
 import { faker } from "@faker-js/faker";
 import { eq } from "drizzle-orm";
+import { uuidv7 } from "uuidv7";
 import {
 	afterEach,
 	beforeAll,
@@ -343,7 +344,7 @@ suite("Mutation deleteComment", () => {
 				headers: { authorization: `bearer ${adminToken}` },
 				variables: {
 					input: {
-						name: faker.company.name(),
+						name: faker.company.name() + uuidv7(),
 						countryCode: "in",
 						isUserRegistrationRequired: false,
 					},

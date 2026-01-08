@@ -787,14 +787,22 @@ describe("GraphQLSchemaManager", () => {
 	});
 
 	describe("Error Handling", () => {
-		let consoleSpy: ReturnType<typeof vi.spyOn>;
+		const mockLogger = {
+			info: vi.fn(),
+			error: vi.fn(),
+		};
 
 		beforeEach(() => {
-			consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+			schemaManager.setLogger(mockLogger);
+			mockLogger.info.mockClear();
+			mockLogger.error.mockClear();
 		});
 
 		afterEach(() => {
-			consoleSpy.mockRestore();
+			// Restore default logger if needed, or rely on setup/teardown
+			// For now, leaving the mock logger is fine as it's per-suite or we can reset it.
+			// But better to not interfere with other tests if they exist outside this describe.
+			// However, other tests don't seem to check logs.
 		});
 
 		it("should handle missing plugin manager during extension registration", async () => {
@@ -807,7 +815,7 @@ describe("GraphQLSchemaManager", () => {
 			).registerActivePluginExtensions.bind(schemaManager);
 			await registerActivePluginExtensions();
 
-			expect(consoleSpy).toHaveBeenCalledWith(
+			expect(mockLogger.info).toHaveBeenCalledWith(
 				"Plugin Manager Not Available or Not Initialized",
 			);
 		});
@@ -822,7 +830,7 @@ describe("GraphQLSchemaManager", () => {
 			).registerActivePluginExtensions.bind(schemaManager);
 			await registerActivePluginExtensions();
 
-			expect(consoleSpy).toHaveBeenCalledWith(
+			expect(mockLogger.info).toHaveBeenCalledWith(
 				"Plugin Manager Not Available or Not Initialized",
 			);
 		});
@@ -838,7 +846,7 @@ describe("GraphQLSchemaManager", () => {
 			).registerActivePluginExtensions.bind(schemaManager);
 			await registerActivePluginExtensions();
 
-			expect(consoleSpy).toHaveBeenCalledWith(
+			expect(mockLogger.info).toHaveBeenCalledWith(
 				"No plugins loaded, skipping plugin extension registration",
 			);
 		});
@@ -895,10 +903,10 @@ describe("GraphQLSchemaManager", () => {
 			).registerActivePluginExtensions.bind(schemaManager);
 			await registerActivePluginExtensions();
 
-			expect(consoleSpy).toHaveBeenCalledWith(
+			expect(mockLogger.info).toHaveBeenCalledWith(
 				"No types file found for plugin test_plugin",
 			);
-			expect(consoleSpy).toHaveBeenCalledWith(
+			expect(mockLogger.info).toHaveBeenCalledWith(
 				"Registered builder extension: test_plugin.getTestData",
 			);
 		});
@@ -955,7 +963,7 @@ describe("GraphQLSchemaManager", () => {
 			).registerActivePluginExtensions.bind(schemaManager);
 			await registerActivePluginExtensions();
 
-			expect(consoleSpy).toHaveBeenCalledWith(
+			expect(mockLogger.info).toHaveBeenCalledWith(
 				"Registered builder extension: test_plugin.getTestData",
 			);
 		});

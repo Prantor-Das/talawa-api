@@ -84,6 +84,7 @@ export function createMockGraphQLContext(
 					},
 				),
 		},
+		id: "mock-request-id",
 		currentClient: isAuthenticated
 			? authenticatedClient(userId)
 			: unauthenticatedClient,

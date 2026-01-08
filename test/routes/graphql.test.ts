@@ -3,6 +3,7 @@ import { GraphQLObjectType, GraphQLSchema, GraphQLString } from "graphql";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExplicitAuthenticationTokenPayload } from "~/src/graphql/context";
 import { createContext } from "~/src/routes/graphql";
+import { ErrorCode } from "~/src/utilities/errors/errorCodes";
 import { TalawaGraphQLError } from "~/src/utilities/TalawaGraphQLError";
 
 // Mock dependencies
@@ -14,6 +15,7 @@ vi.mock("~/src/graphql/schemaManager", () => ({
 	default: {
 		buildInitialSchema: vi.fn(),
 		onSchemaUpdate: vi.fn(),
+		setLogger: vi.fn(),
 	},
 }));
 
@@ -440,6 +442,7 @@ describe("GraphQL Routes", () => {
 			log: {
 				info: ReturnType<typeof vi.fn>;
 				error: ReturnType<typeof vi.fn>;
+				debug: ReturnType<typeof vi.fn>;
 			};
 			graphql: {
 				replaceSchema: ReturnType<typeof vi.fn>;
@@ -460,6 +463,7 @@ describe("GraphQL Routes", () => {
 				log: {
 					info: vi.fn(),
 					error: vi.fn(),
+					debug: vi.fn(),
 				},
 				graphql: {
 					replaceSchema: vi.fn(),
@@ -572,7 +576,44 @@ describe("GraphQL Routes", () => {
 						subscriptions: expect.any(Array),
 					}),
 				}),
-				"✅ GraphQL Schema Updated Successfully",
+				"GraphQL Schema Updated Successfully",
+			);
+		});
+
+		it("should handle schema update errors gracefully", async () => {
+			const { graphql } = await import("~/src/routes/graphql");
+
+			await graphql(mockFastifyInstance as unknown as FastifyInstance);
+
+			mockFastifyInstance.graphql.replaceSchema.mockImplementation(() => {
+				throw new Error("Schema replacement failed");
+			});
+
+			const newSchema = new GraphQLSchema({
+				query: new GraphQLObjectType({
+					name: "Query",
+					fields: {
+						test: {
+							type: GraphQLString,
+							resolve: () => "test",
+						},
+					},
+				}),
+			});
+
+			// Trigger schema update
+			mockFastifyInstance.schemaUpdateCallback?.(newSchema);
+
+			expect(mockFastifyInstance.log.error).toHaveBeenCalledWith(
+				expect.objectContaining({
+					error: expect.objectContaining({
+						message: "Schema replacement failed",
+						stack: expect.any(String),
+						name: "Error",
+					}),
+					timestamp: expect.any(String),
+				}),
+				"Failed to Update GraphQL Schema",
 			);
 		});
 
@@ -605,7 +646,7 @@ describe("GraphQL Routes", () => {
 					error: "String error",
 					timestamp: expect.any(String),
 				}),
-				"❌ Failed to Update GraphQL Schema",
+				"Failed to Update GraphQL Schema",
 			);
 		});
 
@@ -643,7 +684,7 @@ describe("GraphQL Routes", () => {
 						subscriptions: ["onThing"],
 					},
 				}),
-				"✅ GraphQL Schema Updated Successfully",
+				"GraphQL Schema Updated Successfully",
 			);
 		});
 	});
@@ -660,6 +701,7 @@ describe("GraphQL Routes", () => {
 			log: {
 				info: ReturnType<typeof vi.fn>;
 				error: ReturnType<typeof vi.fn>;
+				debug: ReturnType<typeof vi.fn>;
 			};
 			graphql: {
 				replaceSchema: ReturnType<typeof vi.fn>;
@@ -703,6 +745,7 @@ describe("GraphQL Routes", () => {
 				log: {
 					info: vi.fn(),
 					error: vi.fn(),
+					debug: vi.fn(),
 				},
 				graphql: {
 					replaceSchema: vi.fn(),
@@ -871,7 +914,7 @@ describe("GraphQL Routes", () => {
 
 			expect(TalawaGraphQLError).toHaveBeenCalledWith({
 				extensions: {
-					code: "unexpected",
+					code: ErrorCode.INTERNAL_SERVER_ERROR,
 				},
 				message: "IP address is not available for rate limiting",
 			});
@@ -900,7 +943,7 @@ describe("GraphQL Routes", () => {
 			).rejects.toThrow("Rate limit exceeded");
 
 			expect(TalawaGraphQLError).toHaveBeenCalledWith({
-				extensions: { code: "too_many_requests" },
+				extensions: { code: ErrorCode.RATE_LIMIT_EXCEEDED },
 			});
 		});
 
@@ -976,6 +1019,7 @@ describe("GraphQL Routes", () => {
 			log: {
 				info: ReturnType<typeof vi.fn>;
 				error: ReturnType<typeof vi.fn>;
+				debug: ReturnType<typeof vi.fn>;
 			};
 			graphql: {
 				replaceSchema: ReturnType<typeof vi.fn>;
@@ -995,6 +1039,7 @@ describe("GraphQL Routes", () => {
 				log: {
 					info: vi.fn(),
 					error: vi.fn(),
+					debug: vi.fn(),
 				},
 				graphql: {
 					replaceSchema: vi.fn(),
@@ -1087,6 +1132,29 @@ describe("GraphQL Routes", () => {
 			);
 		});
 
+		it("should handle subscription connections without authorization payload", async () => {
+			const { graphql } = await import("~/src/routes/graphql");
+
+			await graphql(mockFastifyInstance as unknown as FastifyInstance);
+
+			const mercuriusCall = mockFastifyInstance.register.mock.calls.find(
+				(call: unknown[]) =>
+					(call?.[1] as { subscription?: unknown })?.subscription,
+			);
+
+			const subscriptionConfig = mercuriusCall?.[1] as {
+				subscription: {
+					onConnect: (data: unknown) => Promise<boolean | object>;
+				};
+			};
+
+			const result = await subscriptionConfig.subscription.onConnect({
+				payload: {}, // No authorization field
+			});
+
+			expect(result).toBe(false);
+		});
+
 		it("should reject subscription connections with invalid Bearer token and log error", async () => {
 			const { graphql } = await import("~/src/routes/graphql");
 
@@ -1174,6 +1242,7 @@ describe("GraphQL Routes", () => {
 			log: {
 				info: ReturnType<typeof vi.fn>;
 				error: ReturnType<typeof vi.fn>;
+				debug: ReturnType<typeof vi.fn>;
 			};
 			graphql: {
 				replaceSchema: ReturnType<typeof vi.fn>;
@@ -1190,6 +1259,7 @@ describe("GraphQL Routes", () => {
 				log: {
 					info: vi.fn(),
 					error: vi.fn(),
+					debug: vi.fn(),
 				},
 				graphql: {
 					replaceSchema: vi.fn(),
@@ -1271,6 +1341,7 @@ describe("GraphQL Routes", () => {
 					request: {
 						id: "correlation-123",
 					},
+					send: vi.fn(),
 				},
 			};
 
@@ -1288,10 +1359,10 @@ describe("GraphQL Routes", () => {
 							message: "Test error",
 							locations: [{ line: 1, column: 5 }],
 							path: ["user", "email"],
-							extensions: {
+							extensions: expect.objectContaining({
 								code: "VALIDATION_ERROR",
 								correlationId: "correlation-123",
-							},
+							}),
 						},
 					],
 				},
@@ -1355,6 +1426,7 @@ describe("GraphQL Routes", () => {
 					request: {
 						id: "req-456",
 					},
+					send: vi.fn(),
 				},
 			};
 
@@ -1372,9 +1444,9 @@ describe("GraphQL Routes", () => {
 							message: "Syntax error",
 							locations: [{ line: 2, column: 10 }],
 							path: undefined,
-							extensions: {
+							extensions: expect.objectContaining({
 								correlationId: "req-456",
-							},
+							}),
 						},
 					],
 				},
@@ -1446,6 +1518,7 @@ describe("GraphQL Routes", () => {
 					request: {
 						id: "multi-error-789",
 					},
+					send: vi.fn(),
 				},
 			};
 
@@ -1463,20 +1536,20 @@ describe("GraphQL Routes", () => {
 							message: "Unauthorized",
 							locations: undefined,
 							path: undefined,
-							extensions: {
+							extensions: expect.objectContaining({
 								code: "UNAUTHENTICATED",
 								correlationId: "multi-error-789",
-							},
+							}),
 						},
 						{
 							message: "Field not found",
 							locations: undefined,
 							path: ["query", "nonExistent"],
-							extensions: {
+							extensions: expect.objectContaining({
 								code: "GRAPHQL_VALIDATION_FAILED",
 								timestamp: 123456,
 								correlationId: "multi-error-789",
-							},
+							}),
 						},
 					],
 				},
@@ -1538,6 +1611,7 @@ describe("GraphQL Routes", () => {
 					request: {
 						id: "no-data-req",
 					},
+					send: vi.fn(),
 				},
 			};
 

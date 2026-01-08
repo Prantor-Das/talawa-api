@@ -1,6 +1,8 @@
 import { complexityFromQuery } from "@pothos/plugin-complexity";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import fastifyPlugin from "fastify-plugin";
+import type { ExecutionResult } from "graphql";
+import type { MercuriusContext } from "mercurius";
 import { mercurius } from "mercurius";
 import { mercuriusUpload } from "mercurius-upload";
 import type {
@@ -10,6 +12,7 @@ import type {
 } from "~/src/graphql/context";
 import schemaManager from "~/src/graphql/schemaManager";
 import NotificationService from "~/src/services/notification/NotificationService";
+import { ErrorCode } from "~/src/utilities/errors/errorCodes";
 import {
 	COOKIE_NAMES,
 	getAccessTokenCookieOptions,
@@ -18,9 +21,16 @@ import {
 	getRefreshTokenCookieOptions,
 } from "../utilities/cookieConfig";
 import { createDataloaders } from "../utilities/dataloaders";
+import { formatGraphQLErrors } from "../utilities/formatGraphQLErrors";
 import leakyBucket from "../utilities/leakyBucket";
 import { DEFAULT_REFRESH_TOKEN_EXPIRES_MS } from "../utilities/refreshTokenUtils";
 import { TalawaGraphQLError } from "../utilities/TalawaGraphQLError";
+
+/**
+ * GraphQL endpoint path constant.
+ * This centralizes the GraphQL endpoint path configuration for reuse across modules.
+ */
+export const GRAPHQL_PATH = "/graphql";
 
 /**
  * Type of the initial context argument provided to the createContext function by the graphql server.
@@ -74,7 +84,11 @@ export const createContext: CreateContext = async (initialContext) => {
 			isAuthenticated: true,
 			user: jwtPayload.user,
 		};
-	} catch (_headerError) {
+	} catch (headerError) {
+		(request.log ?? fastify.log).debug(
+			{ error: headerError },
+			"Authorization header verification failed",
+		);
 		// If no Authorization header, try to get token from cookie (web clients)
 		const accessTokenFromCookie = request.cookies?.[COOKIE_NAMES.ACCESS_TOKEN];
 		if (accessTokenFromCookie) {
@@ -87,7 +101,11 @@ export const createContext: CreateContext = async (initialContext) => {
 					isAuthenticated: true,
 					user: jwtPayload.user,
 				};
-			} catch (_cookieError) {
+			} catch (cookieError) {
+				(request.log ?? fastify.log).debug(
+					{ error: cookieError },
+					"Cookie token verification failed",
+				);
 				currentClient = {
 					isAuthenticated: false,
 				};
@@ -158,6 +176,7 @@ export const createContext: CreateContext = async (initialContext) => {
 				fastify.jwt.sign(payload),
 		},
 		cookie: cookieHelper,
+		id: request.id,
 		log: request.log ?? fastify.log,
 		minio: fastify.minio,
 		// attached a per-request notification service that queues notifications and can flush later
@@ -197,9 +216,92 @@ export const graphql = fastifyPlugin(async (fastify) => {
 	 * 2. {@link https://github.com/flash-oss/graphql-upload-minimal/blob/56e83775b114edc169f605041d983156d4131387/public/index.js#L61}
 	 */
 	await fastify.register(mercuriusUpload, FILE_UPLOAD_CONFIG);
+	schemaManager.setLogger({
+		info: (msg: string) => fastify.log.info(msg),
+		error: (msg: string, error?: unknown) => fastify.log.error({ error }, msg),
+	});
 
 	// Build initial schema with active plugins
 	const initialSchema = await schemaManager.buildInitialSchema();
+
+	/**
+	 * Unified GraphQL error formatter that provides consistent error responses.
+	 *
+	 * This formatter ensures that all GraphQL errors follow the same structure as REST errors
+	 * by adding standardized extensions with error codes, correlation IDs, and HTTP status codes.
+	 * It integrates with the unified error handling system to provide consistent error shapes
+	 * across both REST and GraphQL endpoints.
+	 *
+	 * Features:
+	 * - Maps ErrorCode enum values to HTTP status codes
+	 * - Adds correlation IDs for request tracing
+	 * - Preserves error paths and original error details
+	 * - Provides structured logging with error context
+	 * - Sets appropriate HTTP response status codes
+	 *
+	 * @param execution - GraphQL execution result containing errors and data
+	 * @param context - Mercurius context with request/reply objects
+	 * @returns Formatted error response with standardized structure
+	 *
+	 * @example
+	 * ```json
+	 * // Error response format:
+	 * {
+	 *   "errors": [{
+	 *     "message": "User not found",
+	 *     "path": ["user"],
+	 *     "extensions": {
+	 *       "code": "not_found",
+	 *       "details": { "userId": "123" },
+	 *       "correlationId": "req-abc123",
+	 *       "httpStatus": 404
+	 *     }
+	 *   }],
+	 *   "data": null
+	 * }
+	 * ```
+	 */
+	const errorFormatter = (
+		execution: ExecutionResult,
+		context: MercuriusContext,
+	) => {
+		const { errors, data } = execution;
+
+		if (!errors) {
+			return { statusCode: 200, response: execution };
+		}
+
+		// For subscriptions, context.reply is undefined. We check context.correlationId (set in onConnect)
+		// or generate a fallback if both are missing.
+		const correlationId =
+			(context.reply?.request?.id as string | undefined) ??
+			(context as { correlationId?: string }).correlationId ??
+			`sub-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+
+		const logger =
+			"log" in context
+				? (context as { log: FastifyInstance["log"] }).log
+				: context.reply?.request?.log;
+
+		// Return 200 for HTTP per spec
+		// use mapped status for subscriptions or tests.
+		const isRealHttpRequest = !!context.reply;
+		const httpStatusCode = isRealHttpRequest ? 200 : undefined;
+
+		const { formatted, statusCode: mappedStatusCode } = formatGraphQLErrors(
+			errors,
+			correlationId,
+			logger,
+			httpStatusCode, // Passing the HTTP status code for logging
+		);
+
+		const statusCode = httpStatusCode ?? mappedStatusCode;
+
+		return {
+			statusCode,
+			response: { data: data ?? null, errors: formatted },
+		};
+	};
 
 	// More information at this link: https://mercurius.dev/#/docs/api/options?id=mercurius
 	await fastify.register(mercurius, {
@@ -214,27 +316,9 @@ export const graphql = fastifyPlugin(async (fastify) => {
 			enabled: fastify.envConfig.API_IS_GRAPHIQL,
 		},
 		cache: false,
-		path: "/graphql",
+		path: GRAPHQL_PATH,
 		schema: initialSchema,
-		errorFormatter: (execution, context) => {
-			const correlationId = context.reply.request.id;
-
-			return {
-				statusCode: 200,
-				response: {
-					data: execution.data ?? null,
-					errors: execution.errors.map((err) => ({
-						message: err.message,
-						locations: err.locations,
-						path: err.path,
-						extensions: {
-							...err.extensions,
-							correlationId,
-						},
-					})),
-				},
-			};
-		},
+		errorFormatter,
 		subscription: {
 			onConnect: async (data) => {
 				const { payload } = data;
@@ -257,7 +341,7 @@ export const graphql = fastifyPlugin(async (fastify) => {
 							isAuthenticated: true,
 							user: decoded.user,
 						},
-						dataloaders: createDataloaders(fastify.drizzleClient),
+						id: `sub-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
 						drizzleClient: fastify.drizzleClient,
 						envConfig: fastify.envConfig,
 						jwt: {
@@ -310,7 +394,7 @@ export const graphql = fastifyPlugin(async (fastify) => {
 						),
 					},
 				},
-				"✅ GraphQL Schema Updated Successfully",
+				"GraphQL Schema Updated Successfully",
 			);
 		} catch (error) {
 			fastify.log.error(
@@ -325,7 +409,7 @@ export const graphql = fastifyPlugin(async (fastify) => {
 							: String(error),
 					timestamp: new Date().toISOString(),
 				},
-				"❌ Failed to Update GraphQL Schema",
+				"Failed to Update GraphQL Schema",
 			);
 		}
 	});
@@ -367,7 +451,11 @@ export const graphql = fastifyPlugin(async (fastify) => {
 					isAuthenticated: true,
 					user: jwtPayload.user,
 				};
-			} catch (_error) {
+			} catch (error) {
+				(request.log ?? fastify.log).debug(
+					{ error },
+					"JWT verification failed in preExecution hook",
+				);
 				currentClient = {
 					isAuthenticated: false,
 				};
@@ -376,7 +464,7 @@ export const graphql = fastifyPlugin(async (fastify) => {
 			if (!ip) {
 				throw new TalawaGraphQLError({
 					extensions: {
-						code: "unexpected",
+						code: ErrorCode.INTERNAL_SERVER_ERROR,
 					},
 					message: "IP address is not available for rate limiting",
 				});
@@ -403,7 +491,7 @@ export const graphql = fastifyPlugin(async (fastify) => {
 			// If the request exceeds rate limits, reject it
 			if (!isRequestAllowed) {
 				throw new TalawaGraphQLError({
-					extensions: { code: "too_many_requests" },
+					extensions: { code: ErrorCode.RATE_LIMIT_EXCEEDED },
 				});
 			}
 		},
